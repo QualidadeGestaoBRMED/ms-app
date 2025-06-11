@@ -1,0 +1,31 @@
+# === Ambientes Virtuais ===
+.venv/
+venv/
+env/
+
+# === Credenciais e Tokens (sensíveis) ===
+credentials.json
+token.json
+
+# === Arquivo de Configuração ===
+config.ini
+
+# === Dados Gerados e Logs ===
+DATABASES/
+*.log
+
+# === Arquivos de Cache do Python ===
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# === Arquivos específicos de Sistemas Operacionais ===
+# macOS
+.DS_Store
+# Windows
+Thumbs.db
+
+# === Arquivos de IDEs e Editores de Código Comuns ===
+.idea/
+.vscode/

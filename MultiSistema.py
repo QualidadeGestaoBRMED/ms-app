@@ -3,7 +3,6 @@ import os
 import os.path
 import configparser
 import logging
-import sqlite3
 from playwright.sync_api import sync_playwright, TimeoutError as PlaywrightTimeoutError
 from google.auth.transport.requests import Request
 from google.oauth2.credentials import Credentials
@@ -23,19 +22,16 @@ SCOPES = ["https://www.googleapis.com/auth/spreadsheets"]
 SAMPLE_SPREADSHEET_ID = config['GOOGLE_SHEETS']['spreadsheet_id']
 ABA_CARIMBO = config['GOOGLE_SHEETS']['aba_carimbo']
 PASTA_DATABASES = config['CAMINHOS']['pasta_databases']
-NOME_BANCO_DE_DADOS = os.path.join(PASTA_DATABASES, 'database.sqlite')
 BRNET_CREDS = config['BRNET_CREDENCIALS']
 
 def excluir_arquivos_antigos():
     """
-    Remove todos os arquivos da pasta de databases, exceto arquivos .sqlite.
+    Remove todos os arquivos da pasta de databases.
     Garante que a execução sempre comece com a pasta limpa.
     """
     logging.info(f"Limpando a pasta de destino: {PASTA_DATABASES}")
     try:
         for filename in os.listdir(PASTA_DATABASES):
-            if filename.endswith('.sqlite'):
-                continue
             file_path = os.path.join(PASTA_DATABASES, filename)
             if os.path.isfile(file_path):
                 os.remove(file_path)
@@ -158,197 +154,193 @@ def escrever_dados_planilha(dados_para_adicionar, nome_da_aba):
         logging.error(
             f"Ocorreu um erro ao escrever dados no Google Sheets: {err}")
 
-def inicializar_banco_de_dados():
-    """
-    Cria o arquivo do banco de dados SQLite e a tabela 'atendimentos' caso não existam.
-    """
-    conn = sqlite3.connect(NOME_BANCO_DE_DADOS)
-    cursor = conn.cursor()
-    cursor.execute('''
-        CREATE TABLE IF NOT EXISTS atendimentos (
-            ID_Unico TEXT PRIMARY KEY, Paciente TEXT, CPF_Passaporte TEXT, Funcao TEXT, Setor TEXT,
-            Empresa TEXT, Grupo TEXT, Local_do_Atendimento TEXT, Atendido_Em TEXT, Previsto_Para TEXT,
-            Liberado_Em TEXT, Status_Expedicao_BR_MED TEXT, Exame_Alterado TEXT, Tipo_de_Pedido TEXT
-        )
-    ''')
-    conn.commit()
-    conn.close()
-    logging.info(
-        f"Banco de dados '{NOME_BANCO_DE_DADOS}' inicializado com sucesso.")
-
 def sanitizar_nome_coluna(nome_coluna):
     """
     Remove acentos e substitui caracteres problemáticos por underscore nos nomes de colunas.
-    Garante compatibilidade dos nomes de colunas com o SQLite.
+    Garante compatibilidade dos nomes de colunas.
     """
     s = ''.join(c for c in unicodedata.normalize('NFD', str(nome_coluna))
                 if unicodedata.category(c) != 'Mn')
     return s.replace(' ', '_').replace('-', '_').replace('.', '_').replace('/', '_')
 
-def atualizar_banco_com_arquivos_locais(mapa_arquivos_abas):
+def obter_dados_existentes_planilha(nome_aba):
     """
-    Lê os arquivos baixados, processa os dados e atualiza o banco de dados SQLite.
-    Utiliza transação para garantir atomicidade das operações.
+    Obtém todos os dados existentes da aba do Google Sheets.
+    Retorna o cabeçalho e os IDs únicos já existentes.
     """
-    logging.info("Iniciando atualização transacional do banco de dados local...")
-    conn = sqlite3.connect(NOME_BANCO_DE_DADOS)
-    try:
-        for chave_arquivo, nome_aba in mapa_arquivos_abas.items():
-            arquivos_encontrados = [
-                f for f in os.listdir(PASTA_DATABASES) if f.startswith(chave_arquivo)]
-            if not arquivos_encontrados:
-                continue
-            caminho_completo = os.path.join(
-                PASTA_DATABASES, arquivos_encontrados[0])
-            logging.info(
-                f"Processando arquivo para o banco: {arquivos_encontrados[0]}")
-            tabelas = pd.read_html(caminho_completo, encoding='utf-8')
-            df_arquivo = tabelas[0]
-            header_row_index = next((i for i, row in df_arquivo.head(
-                10).iterrows() if 'Paciente' in str(row.values)), -1)
-            if header_row_index == -1:
-                logging.warning(
-                    f"Cabeçalho 'Paciente' não encontrado no arquivo {chave_arquivo}. Pulando.")
-                continue
-            df_arquivo.columns = df_arquivo.iloc[header_row_index]
-            df_arquivo = df_arquivo.iloc[header_row_index + 1:].reset_index(drop=True)
-            df_arquivo.columns = [sanitizar_nome_coluna(
-                col) for col in df_arquivo.columns]
-            colunas_essenciais = [
-                'CPF_Passaporte', 'Previsto_Para', 'Tipo_de_Pedido']
-            df_arquivo.dropna(subset=colunas_essenciais, inplace=True)
-            if df_arquivo.empty:
-                logging.warning(
-                    f"Nenhuma linha válida no arquivo {chave_arquivo} após validação.")
-                continue
-            colunas_db = {
-                'ID_Unico': 'ID_Unico', 'Paciente': 'Paciente', 'CPF_Passaporte': 'CPF_Passaporte',
-                'Funcao': 'Funcao', 'Setor': 'Setor', 'Empresa': 'Empresa', 'Grupo': 'Grupo',
-                'Local_do_Atendimento': 'Local_do_Atendimento', 'Atendido_Em': 'Atendido_Em',
-                'Previsto_Para': 'Previsto_Para', 'Liberado_Em': 'Liberado_Em',
-                'Status_Expedicao_BR_MED': 'Status_Expedicao_BR_MED', 'Exame_Alterado': 'Exame_Alterado',
-                'Tipo_de_Pedido': 'Tipo_de_Pedido'
-            }
-            df_para_db = pd.DataFrame()
-            for db_col, arquivo_col in colunas_db.items():
-                if arquivo_col in df_arquivo.columns:
-                    df_para_db[db_col] = df_arquivo[arquivo_col]
-                else:
-                    df_para_db[db_col] = ''
-            df_para_db['Previsto_Para'] = pd.to_datetime(
-                df_para_db['Previsto_Para'], errors='coerce', dayfirst=True).dt.strftime('%d/%m/%Y').fillna('')
-            df_para_db['ID_Unico'] = (df_para_db['CPF_Passaporte'].astype(str).str.strip() + "-" +
-                                     df_para_db['Previsto_Para'].astype(
-                                         str).str.strip() + "-" +
-                                     df_para_db['Tipo_de_Pedido'].astype(str).str.strip().str[:3])
-            df_para_db.drop_duplicates(subset=['ID_Unico'], keep='first', inplace=True)
-            df_para_db.to_sql('atendimentos_temp', conn,
-                              if_exists='replace', index=False)
-            cursor = conn.cursor()
-            colunas_str = ', '.join(f'"{c}"' for c in df_para_db.columns)
-            cursor.execute(
-                f'INSERT OR REPLACE INTO atendimentos ({colunas_str}) SELECT {colunas_str} FROM atendimentos_temp')
-    except Exception as e:
-        conn.rollback()
-        logging.exception(
-            f"Erro durante a atualização do banco. Todas as alterações foram desfeitas (rollback).")
-    else:
-        conn.commit()
-        logging.info(
-            "Todos os arquivos processados com sucesso. Alterações salvas no banco de dados.")
-    finally:
-        conn.close()
-
-def sincronizar_sheets_com_banco(nome_aba):
-    """
-    Sincroniza os dados do banco SQLite com a aba correspondente do Google Sheets.
-    Apenas registros novos (não presentes na planilha) são enviados.
-    """
-    logging.info(f"--- Sincronizando aba: {nome_aba} ---")
-    conn = sqlite3.connect(NOME_BANCO_DE_DADOS)
     try:
         creds = autenticar_google_sheets()
         service = build("sheets", "v4", credentials=creds)
         result = service.spreadsheets().values().get(
             spreadsheetId=SAMPLE_SPREADSHEET_ID, range=nome_aba).execute()
         valores_existentes = result.get("values", [])
+        
         if not valores_existentes:
-            logging.warning(
-                f"Aba '{nome_aba}' está vazia. Pulando sincronização.")
-            conn.close()
-            return
+            logging.warning(f"Aba '{nome_aba}' está vazia.")
+            return [], []
+        
         cabecalho_planilha = valores_existentes[0]
         ids_existentes = []
+        
         if len(valores_existentes) > 1:
             dados_existentes = valores_existentes[1:]
             df_sheet = pd.DataFrame(dados_existentes)
-            num_cols_para_renomear = min(
-                len(cabecalho_planilha), df_sheet.shape[1])
+            num_cols_para_renomear = min(len(cabecalho_planilha), df_sheet.shape[1])
             df_sheet.columns = cabecalho_planilha[:num_cols_para_renomear]
             if 'ID_Unico' in df_sheet.columns:
                 ids_existentes = df_sheet['ID_Unico'].dropna().tolist()
-        query = f"SELECT * FROM atendimentos WHERE Grupo = '{nome_aba}'"
-        df_sqlite = pd.read_sql_query(query, conn)
-        if df_sqlite.empty:
-            logging.info(f"Nenhum dado no banco para o grupo '{nome_aba}'.")
-            conn.close()
+        
+        return cabecalho_planilha, ids_existentes
+    except Exception as e:
+        logging.error(f"Erro ao obter dados existentes da aba {nome_aba}: {e}")
+        return [], []
+
+def processar_e_sincronizar_arquivo(chave_arquivo, nome_aba):
+    """
+    Processa um arquivo específico e sincroniza diretamente com o Google Sheets.
+    Mantém a lógica de tratamento de duplicatas usando ID_Unico.
+    """
+    logging.info(f"--- Processando e sincronizando: {nome_aba} ---")
+    
+    # Procura o arquivo correspondente
+    arquivos_encontrados = [
+        f for f in os.listdir(PASTA_DATABASES) if f.startswith(chave_arquivo)]
+    
+    if not arquivos_encontrados:
+        logging.warning(f"Nenhum arquivo encontrado para {chave_arquivo}")
+        return
+    
+    caminho_completo = os.path.join(PASTA_DATABASES, arquivos_encontrados[0])
+    logging.info(f"Processando arquivo: {arquivos_encontrados[0]}")
+    
+    try:
+        # Lê o arquivo
+        tabelas = pd.read_html(caminho_completo, encoding='utf-8')
+        df_arquivo = tabelas[0]
+        
+        # Encontra o cabeçalho
+        header_row_index = next((i for i, row in df_arquivo.head(10).iterrows() 
+                               if 'Paciente' in str(row.values)), -1)
+        
+        if header_row_index == -1:
+            logging.warning(f"Cabeçalho 'Paciente' não encontrado no arquivo {chave_arquivo}. Pulando.")
             return
-        mapa_nomes_invertido = {
-            'CPF_Passaporte': 'CPF/Passaporte', 'Local_do_Atendimento': 'Local do Atendimento',
-            'Atendido_Em': 'Atendido Em', 'Previsto_Para': 'Previsto Para', 'Liberado_Em': 'Liberado Em',
-            'Status_Expedicao_BR_MED': 'Status Expedição - BR MED', 'Exame_Alterado': 'Exame Alterado',
-            'Tipo_de_Pedido': 'Tipo de Pedido', 'Funcao': 'Função'
+        
+        # Configura o DataFrame
+        df_arquivo.columns = df_arquivo.iloc[header_row_index]
+        df_arquivo = df_arquivo.iloc[header_row_index + 1:].reset_index(drop=True)
+        df_arquivo.columns = [sanitizar_nome_coluna(col) for col in df_arquivo.columns]
+        
+        # Valida colunas essenciais
+        colunas_essenciais = ['CPF_Passaporte', 'Previsto_Para', 'Tipo_de_Pedido']
+        df_arquivo.dropna(subset=colunas_essenciais, inplace=True)
+        
+        if df_arquivo.empty:
+            logging.warning(f"Nenhuma linha válida no arquivo {chave_arquivo} após validação.")
+            return
+        
+        # Mapeia as colunas para o formato final
+        colunas_db = {
+            'ID_Unico': 'ID_Unico', 'Paciente': 'Paciente', 'CPF_Passaporte': 'CPF_Passaporte',
+            'Funcao': 'Funcao', 'Setor': 'Setor', 'Empresa': 'Empresa', 'Grupo': 'Grupo',
+            'Local_do_Atendimento': 'Local_do_Atendimento', 'Atendido_Em': 'Atendido_Em',
+            'Previsto_Para': 'Previsto_Para', 'Liberado_Em': 'Liberado_Em',
+            'Status_Expedicao_BR_MED': 'Status_Expedicao_BR_MED', 'Exame_Alterado': 'Exame_Alterado',
+            'Tipo_de_Pedido': 'Tipo_de_Pedido'
         }
-        df_sqlite.rename(columns=mapa_nomes_invertido, inplace=True)
-        df_final = df_sqlite.reindex(
-            columns=cabecalho_planilha, fill_value='')
-        df_novos_registros = df_final[~df_final['ID_Unico'].isin(
-            ids_existentes)]
+        
+        df_processado = pd.DataFrame()
+        for db_col, arquivo_col in colunas_db.items():
+            if arquivo_col in df_arquivo.columns:
+                df_processado[db_col] = df_arquivo[arquivo_col]
+            else:
+                df_processado[db_col] = ''
+        
+        # Formata a data e cria o ID único
+        df_processado['Previsto_Para'] = pd.to_datetime(
+            df_processado['Previsto_Para'], errors='coerce', dayfirst=True).dt.strftime('%d/%m/%Y').fillna('')
+        
+        df_processado['ID_Unico'] = (
+            df_processado['CPF_Passaporte'].astype(str).str.strip() + "-" +
+            df_processado['Previsto_Para'].astype(str).str.strip() + "-" +
+            df_processado['Tipo_de_Pedido'].astype(str).str.strip().str[:3]
+        )
+        
+        # Remove duplicatas dentro do próprio arquivo
+        df_processado.drop_duplicates(subset=['ID_Unico'], keep='first', inplace=True)
+        
+        # Obtém dados existentes da planilha
+        cabecalho_planilha, ids_existentes = obter_dados_existentes_planilha(nome_aba)
+        
+        if not cabecalho_planilha:
+            logging.warning(f"Não foi possível obter o cabeçalho da aba {nome_aba}")
+            return
+        
+        # Renomeia as colunas para o formato da planilha
+        mapa_nomes_invertido = {
+            'CPF_Passaporte': 'CPF/Passaporte', 
+            'Local_do_Atendimento': 'Local do Atendimento',
+            'Atendido_Em': 'Atendido Em', 
+            'Previsto_Para': 'Previsto Para', 
+            'Liberado_Em': 'Liberado Em',
+            'Status_Expedicao_BR_MED': 'Status Expedição - BR MED', 
+            'Exame_Alterado': 'Exame Alterado',
+            'Tipo_de_Pedido': 'Tipo de Pedido', 
+            'Funcao': 'Função'
+        }
+        
+        df_processado.rename(columns=mapa_nomes_invertido, inplace=True)
+        
+        # Reordena as colunas conforme o cabeçalho da planilha
+        df_final = df_processado.reindex(columns=cabecalho_planilha, fill_value='')
+        
+        # Filtra apenas registros novos (não existentes na planilha)
+        df_novos_registros = df_final[~df_final['ID_Unico'].isin(ids_existentes)]
+        
         if df_novos_registros.empty:
-            logging.info(
-                "Nenhum registro novo para sincronizar com o Google Sheets.")
+            logging.info(f"Nenhum registro novo para adicionar na aba {nome_aba}.")
         else:
-            logging.info(
-                f"Encontrados {len(df_novos_registros)} novos registros para adicionar ao Google Sheets...")
+            logging.info(f"Encontrados {len(df_novos_registros)} novos registros para adicionar na aba {nome_aba}...")
+            
+            # Sanitiza os dados e adiciona à planilha
             df_sanitizado = df_novos_registros.fillna('')
             dados_para_adicionar = df_sanitizado.values.tolist()
             escrever_dados_planilha(dados_para_adicionar, nome_aba)
+            
     except Exception as e:
-        logging.exception(
-            f"Ocorreu um erro durante a sincronização da aba {nome_aba}: {e}")
-    finally:
-        conn.close()
+        logging.exception(f"Erro ao processar arquivo {chave_arquivo} para aba {nome_aba}: {e}")
 
 def main():
     """
     Função principal que orquestra todo o fluxo:
     1. Limpa a pasta de databases.
     2. Baixa os relatórios dos grupos definidos.
-    3. Atualiza o banco de dados local com os arquivos baixados.
-    4. Sincroniza os dados do banco com o Google Sheets.
-    5. Atualiza o carimbo de execução.
+    3. Processa e sincroniza cada arquivo diretamente com o Google Sheets.
+    4. Atualiza o carimbo de execução.
     """
     mapa_arquivos_abas = dict(config['MAPEAMENTO_ARQUIVOS_ABAS'])
     excluir_arquivos_antigos()
+    
     logging.info("="*50)
     logging.info("Iniciando fase de download dos relatórios do BRNET...")
     logging.info("="*50)
+    
     grupos_para_baixar = [
         "GRUPO TRIGO", "ICTSI RIO", "CONCREMAT", "CONSTELLATION - EXAMES OCUPACIONAIS", "VLT RIO",
         "V.TAL - REDE NEUTRA DE TELECOMUNICACOES S.A.", "IKM", "BAKER HUGHES", "RIP ES", "RIP MACAÉ"
     ]
+    
     for grupo in grupos_para_baixar:
         baixar_relatorios_playwright(grupo)
+    
     logging.info("="*50)
-    logging.info(f"Iniciando processo de atualização do banco de dados...")
+    logging.info("Iniciando processamento e sincronização direta com Google Sheets...")
     logging.info("="*50)
-    inicializar_banco_de_dados()
-    atualizar_banco_com_arquivos_locais(mapa_arquivos_abas)
-    logging.info("="*50)
-    logging.info("Iniciando sincronização do banco de dados local com o Google Sheets...")
-    logging.info("="*50)
-    for nome_aba in mapa_arquivos_abas.values():
-        sincronizar_sheets_com_banco(nome_aba)
+    
+    # Processa e sincroniza cada arquivo diretamente
+    for chave_arquivo, nome_aba in mapa_arquivos_abas.items():
+        processar_e_sincronizar_arquivo(chave_arquivo, nome_aba)
+    
     logging.info("Processo principal finalizado.")
 
 if __name__ == "__main__":

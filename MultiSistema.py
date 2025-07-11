@@ -18,7 +18,7 @@ import unicodedata
 
 # --- Lendo as Configurações do Arquivo .INI ---
 config = configparser.ConfigParser()
-config.read('config.ini')
+config.read('config.ini', encoding='utf-8')
 
 # --- Configurações Globais ---
 SCOPES = ["https://www.googleapis.com/auth/spreadsheets"]
@@ -185,7 +185,7 @@ def baixar_relatorios_com_retry(grupos_para_baixar: List[str]) -> List[str]:
                 if not sucesso:
                     grupos_falharam_nesta_tentativa.append(grupo)
                 else:
-                    logging.info(f"✓ Sucesso: {grupo}")
+                    logging.info(f"Sucesso no download: {grupo}")
             except Exception as e:
                 logging.error(f"✗ Erro inesperado para {grupo}: {e}")
                 grupos_falharam_nesta_tentativa.append(grupo)
@@ -205,7 +205,7 @@ def baixar_relatorios_com_retry(grupos_para_baixar: List[str]) -> List[str]:
                 logging.info(f"Aguardando {pausa}s antes da próxima tentativa...")
                 time.sleep(pausa)
         else:
-            logging.info("✓ Todos os downloads foram concluídos com sucesso!")
+            logging.info("Todos os downloads foram concluídos com sucesso!")
             grupos_pendentes = []
             break
     
@@ -508,7 +508,7 @@ def encontrar_arquivo_por_palavra_chave(palavra_chave: str, nome_aba: str) -> Op
     arquivos_exatos = [f for f in arquivos_na_pasta if f.startswith(palavra_chave)]
     if arquivos_exatos:
         arquivo_encontrado = arquivos_exatos[0]
-        logging.info(f"✓ Arquivo encontrado por correspondência exata: {arquivo_encontrado}")
+        logging.info(f"Arquivo encontrado por correspondência exata: {arquivo_encontrado}")
         return os.path.join(PASTA_DATABASES, arquivo_encontrado)
     
     # Se não encontrar, procura por palavras-chave baseadas no nome da aba
@@ -518,7 +518,7 @@ def encontrar_arquivo_por_palavra_chave(palavra_chave: str, nome_aba: str) -> Op
         nome_arquivo_lower = arquivo.lower()
         # Verifica se todas as palavras-chave estão presentes no nome do arquivo
         if all(palavra.lower() in nome_arquivo_lower for palavra in palavras_chave_aba):
-            logging.info(f"✓ Arquivo encontrado por palavras-chave '{palavras_chave_aba}': {arquivo}")
+            logging.info(f"Arquivo encontrado por palavras-chave '{palavras_chave_aba}': {arquivo}")
             return os.path.join(PASTA_DATABASES, arquivo)
     
     # Busca mais flexível - pelo menos uma palavra-chave
@@ -747,7 +747,7 @@ if __name__ == "__main__":
         level=logging.INFO,
         format='%(asctime)s - %(levelname)s - %(message)s',
         handlers=[
-            logging.FileHandler("multisistema.log", mode='w'),
+            logging.FileHandler("multisistema.log", mode='w', encoding='utf-8'),
             logging.StreamHandler()
         ]
     )

@@ -29,3 +29,7 @@ Thumbs.db
 # === Arquivos de IDEs e Editores de Código Comuns ===
 .idea/
 .vscode/
+
+# === Scripts de Teste ===
+baker_hughes.py
+sync_sheets.py

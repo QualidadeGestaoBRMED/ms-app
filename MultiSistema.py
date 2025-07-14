@@ -53,6 +53,17 @@ def validar_configuracoes():
     
     logging.info("Configurações validadas com sucesso.")
 
+def obter_colunas_rpa():
+    """
+    Retorna a lista das colunas que vêm do RPA (até coluna N).
+    Colunas da coluna O em diante são do AppSheet e não devem ser sobrescritas.
+    """
+    return [
+        'ID_Unico', 'Paciente', 'CPF/Passaporte', 'Função', 'Setor', 'Empresa', 'Grupo',
+        'Local do Atendimento', 'Atendido Em', 'Previsto Para', 'Liberado Em',
+        'Status Expedição - BR MED', 'Exame Alterado', 'Tipo de Pedido'
+    ]
+
 def retry_with_backoff(func, max_retries=3, base_delay=1):
     """
     Executa uma função com retry e backoff exponencial.
@@ -112,33 +123,27 @@ def baixar_relatorios_playwright(grupo: str) -> bool:
             try:
                 page = browser.new_page()
                 
-                # Configurações de timeout mais robustas
                 page.set_default_timeout(30000)
                 page.set_default_navigation_timeout(60000)
                 
-                # Login e preenchimento do formulário
                 page.goto(link, timeout=60000)
                 page.locator("#username").fill(usuario)
                 page.get_by_placeholder("Digite sua senha").fill(senha)
                 page.get_by_role("button", name="Entrar").click()
                 
-                # Aguarda e preenche o formulário
                 page.locator("#id_company_group").wait_for(timeout=20000)
                 page.locator("#id_company_group").select_option(label=grupo)
                 page.locator("#id_start").fill(start_date)
                 page.locator("#id_end").fill(end_date)
                 page.locator("#id_email").fill(email)
                 
-                # Solicita o relatório
                 page.locator("#submit").click()
                 logging.info("Relatório solicitado. Aguardando a tabela de resultados...")
                 
-                # Aguarda e atualiza a tabela
                 page.locator("#reload_table").wait_for(timeout=30000)
                 page.locator("#reload_table").click()
                 logging.info("Tabela de resultados atualizada. Aguardando link de download...")
                 
-                # Realiza o download
                 with page.expect_download(timeout=60000) as download_info:
                     page.get_by_role("link", name="Download").first.click()
                 
@@ -148,7 +153,6 @@ def baixar_relatorios_playwright(grupo: str) -> bool:
                 caminho_salvo = os.path.join(PASTA_DATABASES, nome_seguro_arquivo)
                 download.save_as(caminho_salvo)
                 
-                # Verifica se o arquivo foi salvo corretamente
                 if os.path.exists(caminho_salvo) and os.path.getsize(caminho_salvo) > 0:
                     logging.info(f"Download para '{grupo}' concluído com sucesso: {caminho_salvo}")
                     return True
@@ -190,7 +194,6 @@ def baixar_relatorios_com_retry(grupos_para_baixar: List[str]) -> List[str]:
                 logging.error(f"✗ Erro inesperado para {grupo}: {e}")
                 grupos_falharam_nesta_tentativa.append(grupo)
             
-            # Pequena pausa entre downloads para evitar sobrecarga
             if i < len(grupos_pendentes):
                 time.sleep(2)
         
@@ -199,7 +202,6 @@ def baixar_relatorios_com_retry(grupos_para_baixar: List[str]) -> List[str]:
             grupos_pendentes = grupos_falharam_nesta_tentativa
             tentativa += 1
             
-            # Pausa maior entre tentativas
             if tentativa <= 3:
                 pausa = 5 * tentativa
                 logging.info(f"Aguardando {pausa}s antes da próxima tentativa...")
@@ -209,7 +211,6 @@ def baixar_relatorios_com_retry(grupos_para_baixar: List[str]) -> List[str]:
             grupos_pendentes = []
             break
     
-    # Grupos que falharam definitivamente
     if grupos_pendentes:
         grupos_falharam_definitivamente = grupos_pendentes
         logging.error("=== GRUPOS QUE FALHARAM DEFINITIVAMENTE ===")
@@ -222,7 +223,6 @@ def baixar_relatorios_com_retry(grupos_para_baixar: List[str]) -> List[str]:
             print(f"- {grupo}")
         print("="*60 + "\n")
     
-    # Relatório final
     sucesso_count = len(grupos_para_baixar) - len(grupos_falharam_definitivamente)
     logging.info(f"Relatório de downloads: {sucesso_count}/{len(grupos_para_baixar)} grupos baixados com sucesso")
     
@@ -283,56 +283,57 @@ def atualizar_CARIMBO():
 
 def escrever_dados_planilha(dados_para_adicionar: List[List], nome_da_aba: str):
     """
-    Escreve os dados fornecidos na primeira linha vazia da aba especificada do Google Sheets.
+    Adiciona novos dados à planilha usando o método append, que não interfere
+    nas colunas adjacentes com fórmulas de array. Escreve apenas nas colunas
+    gerenciadas pelo RPA (A até N).
     """
-    def escrever_dados_processo():
+    if not dados_para_adicionar:
+        return
+
+    def append_dados_processo():
         creds = autenticar_google_sheets()
         service = build('sheets', 'v4', credentials=creds)
         
-        # Obtém o número de linhas existentes
-        result = service.spreadsheets().values().get(
-            spreadsheetId=SAMPLE_SPREADSHEET_ID,
-            range=nome_da_aba
-        ).execute()
+        body = {"values": dados_para_adicionar}
         
-        ultima_linha = len(result.get('values', []))
-        range_para_escrever = f"{nome_da_aba}!A{ultima_linha + 1}"
-        
-        request = service.spreadsheets().values().update(
+        result = service.spreadsheets().values().append(
             spreadsheetId=SAMPLE_SPREADSHEET_ID,
-            range=range_para_escrever,
+            range=f"{nome_da_aba}!A1", 
             valueInputOption="USER_ENTERED",
-            body={"values": dados_para_adicionar}
+            insertDataOption="INSERT_ROWS",
+            body=body
         ).execute()
         
-        logging.info(f"-> {request.get('updatedCells')} células adicionadas com sucesso na aba '{nome_da_aba}'.")
-    
-    try:
-        retry_with_backoff(escrever_dados_processo, max_retries=3)
-    except Exception as e:
-        logging.error(f"Erro definitivo ao escrever dados no Google Sheets para aba {nome_da_aba}: {e}")
+        logging.info(f"-> {result.get('updates').get('updatedCells')} células adicionadas com sucesso na aba '{nome_da_aba}' via append.")
 
-def executar_updates_em_lote(updates_data: List[Tuple[int, List]], nome_da_aba: str):
+    try:
+        retry_with_backoff(append_dados_processo, max_retries=3)
+    except Exception as e:
+        logging.error(f"Erro definitivo ao adicionar dados no Google Sheets para aba {nome_da_aba}: {e}")
+
+# ### NOVA FUNÇÃO ADICIONADA ###
+def executar_updates_em_lote_colunas_rpa(updates_data: List[Tuple[int, List]], nome_da_aba: str, colunas_rpa: List[str]):
     """
-    Executa múltiplas atualizações em lote usando batchUpdate do Google Sheets.
-    Muito mais eficiente que fazer updates individuais.
+    Executa updates em lote APENAS nas colunas gerenciadas pelo RPA (A-N).
+    Preserva as colunas do AppSheet/ARRAYFORMULA de serem sobrescritas.
     """
     if not updates_data:
         return
-    
+
     def executar_batch_update():
         creds = autenticar_google_sheets()
         service = build('sheets', 'v4', credentials=creds)
         
-        # Prepara as requisições em lote
+        ultima_coluna_letra = chr(ord('A') + len(colunas_rpa) - 1)
+        
         batch_data = []
         for row_index, row_data in updates_data:
+            range_to_update = f"{nome_da_aba}!A{row_index}:{ultima_coluna_letra}{row_index}"
             batch_data.append({
-                'range': f"{nome_da_aba}!A{row_index + 1}",  # +1 porque Sheets usa índice 1
+                'range': range_to_update,
                 'values': [row_data]
             })
-        
-        # Executa o batch update
+            
         body = {
             'valueInputOption': 'USER_ENTERED',
             'data': batch_data
@@ -344,12 +345,12 @@ def executar_updates_em_lote(updates_data: List[Tuple[int, List]], nome_da_aba: 
         ).execute()
         
         total_updated = result.get('totalUpdatedCells', 0)
-        logging.info(f"-> {total_updated} células atualizadas em lote na aba '{nome_da_aba}'.")
-    
+        logging.info(f"-> {total_updated} células atualizadas em lote (colunas A-{ultima_coluna_letra}) na aba '{nome_da_aba}'.")
+
     try:
         retry_with_backoff(executar_batch_update, max_retries=3)
     except Exception as e:
-        logging.error(f"Erro definitivo ao executar updates em lote na aba {nome_da_aba}: {e}")
+        logging.error(f"Erro definitivo ao executar updates em lote (colunas RPA) na aba {nome_da_aba}: {e}")
 
 def sanitizar_nome_coluna(nome_coluna: str) -> str:
     """
@@ -371,7 +372,6 @@ def encontrar_cabecalho(df: pd.DataFrame, palavras_chave: List[str] = None) -> i
     if palavras_chave is None:
         palavras_chave = ['Paciente', 'CPF', 'Nome', 'Previsto']
     
-    # Procura nas primeiras 15 linhas
     for i in range(min(15, len(df))):
         row_str = ' '.join(str(val) for val in df.iloc[i].values if pd.notna(val))
         if any(palavra in row_str for palavra in palavras_chave):
@@ -433,31 +433,32 @@ def obter_dados_existentes_planilha_completos(nome_aba: str) -> Tuple[List[str],
         
         cabecalho_planilha = valores_existentes[0]
         
+        # ### PROTEÇÃO CONTRA CABEÇALHOS DUPLICADOS ###
+        if len(cabecalho_planilha) != len(set(cabecalho_planilha)):
+            logging.error(f"ERRO CRÍTICO NA ABA '{nome_aba}': Nomes de colunas duplicados encontrados no cabeçalho. Corrija a planilha.")
+            # Opcional: poderia levantar uma exceção para parar o script
+            # raise ValueError(f"Cabeçalho duplicado na aba {nome_aba}")
+            return [], pd.DataFrame(), {}
+
         if len(valores_existentes) <= 1:
-            # Apenas cabeçalho, sem dados
             return cabecalho_planilha, pd.DataFrame(), {}
         
         dados_existentes = valores_existentes[1:]
-        
-        # Criar DataFrame com os dados existentes
         df_sheet = pd.DataFrame(dados_existentes)
         
-        # Garantir que temos o número correto de colunas
-        num_cols_para_renomear = min(len(cabecalho_planilha), df_sheet.shape[1])
-        
-        # Adicionar colunas vazias se necessário
+        if df_sheet.shape[1] > len(cabecalho_planilha):
+            df_sheet = df_sheet.iloc[:, :len(cabecalho_planilha)]
+
         while df_sheet.shape[1] < len(cabecalho_planilha):
             df_sheet[f'temp_col_{df_sheet.shape[1]}'] = ''
         
-        # Renomear colunas
-        df_sheet.columns = cabecalho_planilha[:df_sheet.shape[1]]
+        df_sheet.columns = cabecalho_planilha
         
-        # Criar mapeamento ID_Unico -> índice da linha (baseado em 0, mas será convertido para base 1 no update)
         id_para_indice = {}
         if 'ID_Unico' in df_sheet.columns:
             for idx, id_unico in enumerate(df_sheet['ID_Unico']):
                 if pd.notna(id_unico) and str(id_unico).strip():
-                    id_para_indice[str(id_unico).strip()] = idx + 1  # +1 porque a linha 0 é o cabeçalho
+                    id_para_indice[str(id_unico).strip()] = idx + 2 # +2 porque sheets é base 1 e a linha 1 é o cabeçalho
         
         logging.info(f"Dados obtidos da aba {nome_aba}: {len(df_sheet)} registros, {len(id_para_indice)} com ID único")
         return cabecalho_planilha, df_sheet, id_para_indice
@@ -470,20 +471,16 @@ def comparar_linhas(linha_arquivo: pd.Series, linha_planilha: pd.Series, colunas
     """
     Compara duas linhas (Series do pandas) para verificar se há diferenças.
     Retorna True se as linhas são diferentes, False se são iguais.
+    APENAS compara colunas que vêm do arquivo RPA (até coluna N).
     """
-    diferencas_encontradas = []
-    
     for coluna in colunas_comparar:
         if coluna in linha_arquivo.index and coluna in linha_planilha.index:
-            valor_arquivo = str(linha_arquivo[coluna]).strip() if pd.notna(linha_arquivo[coluna]) else ''
-            valor_planilha = str(linha_planilha[coluna]).strip() if pd.notna(linha_planilha[coluna]) else ''
+            valor_arquivo = str(linha_arquivo.get(coluna, '')).strip()
+            valor_planilha = str(linha_planilha.get(coluna, '')).strip()
             
             if valor_arquivo != valor_planilha:
-                diferencas_encontradas.append(coluna)
-    
-    if diferencas_encontradas:
-        logging.debug(f"Diferenças encontradas nas colunas: {diferencas_encontradas}")
-        return True
+                logging.debug(f"Diferença em '{coluna}': Arquivo='{valor_arquivo}', Planilha='{valor_planilha}'")
+                return True
     
     return False
 
@@ -497,39 +494,37 @@ def encontrar_arquivo_por_palavra_chave(palavra_chave: str, nome_aba: str) -> Op
         return None
     
     arquivos_na_pasta = os.listdir(PASTA_DATABASES)
-    
     if not arquivos_na_pasta:
         logging.warning(f"Pasta de databases está vazia: {PASTA_DATABASES}")
         return None
     
-    logging.info(f"Procurando arquivo para '{palavra_chave}' entre {len(arquivos_na_pasta)} arquivos")
+    logging.info(f"Procurando arquivo para '{palavra_chave}' (aba: {nome_aba}) entre {len(arquivos_na_pasta)} arquivos")
     
-    # Primeiro tenta encontrar por correspondência exata da chave original
-    arquivos_exatos = [f for f in arquivos_na_pasta if f.startswith(palavra_chave)]
+    # 1. Tenta por correspondência exata da chave do config (ex: 'grupo_grupotrigo')
+    arquivos_exatos = [f for f in arquivos_na_pasta if palavra_chave.lower() in f.lower()]
     if arquivos_exatos:
         arquivo_encontrado = arquivos_exatos[0]
-        logging.info(f"Arquivo encontrado por correspondência exata: {arquivo_encontrado}")
+        logging.info(f"Arquivo encontrado por correspondência de chave exata: {arquivo_encontrado}")
         return os.path.join(PASTA_DATABASES, arquivo_encontrado)
-    
-    # Se não encontrar, procura por palavras-chave baseadas no nome da aba
+
+    # 2. Se não encontrar, busca por palavras-chave extraídas do nome da ABA
     palavras_chave_aba = extrair_palavras_chave(nome_aba)
     
+    # Busca por TODAS as palavras-chave
     for arquivo in arquivos_na_pasta:
         nome_arquivo_lower = arquivo.lower()
-        # Verifica se todas as palavras-chave estão presentes no nome do arquivo
         if all(palavra.lower() in nome_arquivo_lower for palavra in palavras_chave_aba):
-            logging.info(f"Arquivo encontrado por palavras-chave '{palavras_chave_aba}': {arquivo}")
+            logging.info(f"Arquivo encontrado por palavras-chave (ALL): '{palavras_chave_aba}': {arquivo}")
             return os.path.join(PASTA_DATABASES, arquivo)
-    
-    # Busca mais flexível - pelo menos uma palavra-chave
+
+    # 3. Busca flexível - QUALQUER uma das palavras-chave
     for arquivo in arquivos_na_pasta:
         nome_arquivo_lower = arquivo.lower()
         if any(palavra.lower() in nome_arquivo_lower for palavra in palavras_chave_aba):
-            logging.info(f"✓ Arquivo encontrado por busca flexível: {arquivo}")
+            logging.info(f"Arquivo encontrado por busca flexível (ANY): '{palavras_chave_aba}': {arquivo}")
             return os.path.join(PASTA_DATABASES, arquivo)
-    
+
     logging.warning(f"✗ Nenhum arquivo encontrado para '{palavra_chave}' ou palavras-chave {palavras_chave_aba}")
-    logging.info(f"Arquivos disponíveis: {arquivos_na_pasta}")
     return None
 
 def extrair_palavras_chave(nome_aba: str) -> List[str]:
@@ -537,23 +532,20 @@ def extrair_palavras_chave(nome_aba: str) -> List[str]:
     Extrai palavras-chave do nome da aba para busca de arquivos com lógica melhorada.
     Remove palavras comuns e mantém apenas as mais significativas.
     """
-    # Palavras que devem ser ignoradas na busca
     palavras_ignorar = {
         'grupo', 'da', 'de', 'do', 'dos', 'das', 'e', 'em', 'para', 'com', 
-        's.a.', 'sa', 'ltda', 'ltd', 'inc', 'corp', 'empresa', 'companhia'
+        's.a.', 'sa', 'ltda', 'ltd', 'inc', 'corp', 'empresa', 'companhia',
+        'exames', 'ocupacionais'
     }
     
-    # Divide o nome da aba em palavras e remove pontuações
     nome_limpo = nome_aba.lower().replace('.', ' ').replace('-', ' ').replace('/', ' ').replace('_', ' ')
     palavras = nome_limpo.split()
     
-    # Filtra palavras significativas (remove palavras muito curtas e palavras a ignorar)
     palavras_significativas = [
         palavra for palavra in palavras 
         if len(palavra) >= 3 and palavra not in palavras_ignorar
     ]
     
-    # Se não sobrar nenhuma palavra significativa, usa a primeira palavra original
     if not palavras_significativas:
         primeira_palavra = nome_aba.split()[0].lower() if nome_aba.split() else nome_aba.lower()
         palavras_significativas = [primeira_palavra]
@@ -561,162 +553,121 @@ def extrair_palavras_chave(nome_aba: str) -> List[str]:
     logging.info(f"Palavras-chave extraídas de '{nome_aba}': {palavras_significativas}")
     return palavras_significativas
 
+# ### FUNÇÃO PRINCIPAL DE PROCESSAMENTO - TOTALMENTE REFEITA ###
 def processar_e_sincronizar_arquivo_com_update(chave_arquivo, nome_aba):
     """
-    Processa um arquivo específico e sincroniza com o Google Sheets.
-    Detecta e atualiza registros modificados além de adicionar novos.
-    Usa operações em lote para máxima eficiência.
+    Processa um arquivo e sincroniza com o Google Sheets de forma robusta e segura.
+    - Adiciona novos registros escrevendo apenas nas colunas A-N.
+    - Atualiza registros existentes modificando apenas as colunas A-N.
+    - PRESERVA as colunas com ARRAYFORMULA e dados do AppSheet.
     """
-    logging.info(f"--- Processando e sincronizando com UPDATE: {nome_aba} ---")
+    logging.info(f"--- Processando e sincronizando: {nome_aba} ---")
     
-    # Busca o arquivo usando a função inteligente
     caminho_completo = encontrar_arquivo_por_palavra_chave(chave_arquivo, nome_aba)
-    
     if not caminho_completo:
         logging.warning(f"Nenhum arquivo encontrado para {chave_arquivo} (aba: {nome_aba})")
         return
-    
+
     nome_arquivo = os.path.basename(caminho_completo)
     logging.info(f"Processando arquivo: {nome_arquivo}")
     
     try:
-        # Lê o arquivo
+        # 1. LEITURA E LIMPEZA DO ARQUIVO
         tabelas = pd.read_html(caminho_completo, encoding='utf-8')
         df_arquivo = tabelas[0]
         
-        # Encontra o cabeçalho
-        header_row_index = next((i for i, row in df_arquivo.head(10).iterrows() 
-                               if 'Paciente' in str(row.values)), -1)
-        
+        header_row_index = next((i for i, row in df_arquivo.head(10).iterrows() if 'Paciente' in str(row.values)), -1)
         if header_row_index == -1:
             logging.warning(f"Cabeçalho 'Paciente' não encontrado no arquivo {nome_arquivo}. Pulando.")
             return
-        
-        # Configura o DataFrame
+            
         df_arquivo.columns = df_arquivo.iloc[header_row_index]
         df_arquivo = df_arquivo.iloc[header_row_index + 1:].reset_index(drop=True)
         df_arquivo.columns = [sanitizar_nome_coluna(col) for col in df_arquivo.columns]
         
-        # Valida colunas essenciais
         colunas_essenciais = ['CPF_Passaporte', 'Previsto_Para', 'Tipo_de_Pedido']
-        df_arquivo.dropna(subset=colunas_essenciais, inplace=True)
-        
+        df_arquivo.dropna(subset=colunas_essenciais, how='any', inplace=True)
         if df_arquivo.empty:
             logging.warning(f"Nenhuma linha válida no arquivo {nome_arquivo} após validação.")
             return
-        
-        # Mapeia as colunas para o formato final
-        colunas_db = {
-            'ID_Unico': 'ID_Unico', 'Paciente': 'Paciente', 'CPF_Passaporte': 'CPF_Passaporte',
-            'Funcao': 'Funcao', 'Setor': 'Setor', 'Empresa': 'Empresa', 'Grupo': 'Grupo',
-            'Local_do_Atendimento': 'Local_do_Atendimento', 'Atendido_Em': 'Atendido_Em',
-            'Previsto_Para': 'Previsto_Para', 'Liberado_Em': 'Liberado_Em',
-            'Status_Expedicao_BR_MED': 'Status_Expedicao_BR_MED', 'Exame_Alterado': 'Exame_Alterado',
-            'Tipo_de_Pedido': 'Tipo_de_Pedido'
+            
+        # 2. PROCESSAMENTO E CRIAÇÃO DO DATAFRAME FINAL
+        mapa_nomes_invertido = {
+            'CPF_Passaporte': 'CPF/Passaporte', 'Local_do_Atendimento': 'Local do Atendimento',
+            'Atendido_Em': 'Atendido Em', 'Previsto_Para': 'Previsto Para', 'Liberado_Em': 'Liberado Em',
+            'Status_Expedicao_BR_MED': 'Status Expedição - BR MED', 'Exame_Alterado': 'Exame Alterado',
+            'Tipo_de_Pedido': 'Tipo de Pedido', 'Funcao': 'Função'
         }
-        
+        colunas_arquivo_renomeadas = {v: k for k, v in mapa_nomes_invertido.items()}
+
         df_processado = pd.DataFrame()
-        for db_col, arquivo_col in colunas_db.items():
-            if arquivo_col in df_arquivo.columns:
-                df_processado[db_col] = df_arquivo[arquivo_col]
-            else:
-                df_processado[db_col] = ''
+        for col_planilha in obter_colunas_rpa():
+            col_sanitizada = colunas_arquivo_renomeadas.get(col_planilha, col_planilha)
+            col_sanitizada = sanitizar_nome_coluna(col_sanitizada)
+            
+            if col_sanitizada in df_arquivo.columns:
+                df_processado[col_planilha] = df_arquivo[col_sanitizada]
         
-        # Formata a data e cria o ID único
-        df_processado['Previsto_Para'] = pd.to_datetime(
-            df_processado['Previsto_Para'], errors='coerce', dayfirst=True).dt.strftime('%d/%m/%Y').fillna('')
+        df_processado['Previsto Para'] = pd.to_datetime(
+            df_processado['Previsto Para'], errors='coerce', dayfirst=True).dt.strftime('%d/%m/%Y').fillna('')
         
         df_processado['ID_Unico'] = (
-            df_processado['CPF_Passaporte'].astype(str).str.strip() + "-" +
-            df_processado['Previsto_Para'].astype(str).str.strip() + "-" +
-            df_processado['Tipo_de_Pedido'].astype(str).str.strip().str[:3]
+            df_processado['CPF/Passaporte'].astype(str).str.strip() + "-" +
+            df_processado['Previsto Para'].astype(str).str.strip() + "-" +
+            df_processado['Tipo de Pedido'].astype(str).str.strip().str[:3]
         )
         
-        # Remove duplicatas dentro do próprio arquivo
         df_processado.drop_duplicates(subset=['ID_Unico'], keep='first', inplace=True)
         
-        # Obtém dados existentes da planilha
+        # 3. OBTENÇÃO DOS DADOS DA PLANILHA E COMPARAÇÃO
         cabecalho_planilha, df_planilha_existente, id_para_indice = obter_dados_existentes_planilha_completos(nome_aba)
-        
         if not cabecalho_planilha:
-            logging.warning(f"Não foi possível obter o cabeçalho da aba {nome_aba}")
-            return
-        
-        # Renomeia as colunas para o formato da planilha
-        mapa_nomes_invertido = {
-            'CPF_Passaporte': 'CPF/Passaporte', 
-            'Local_do_Atendimento': 'Local do Atendimento',
-            'Atendido_Em': 'Atendido Em', 
-            'Previsto_Para': 'Previsto Para', 
-            'Liberado_Em': 'Liberado Em',
-            'Status_Expedicao_BR_MED': 'Status Expedição - BR MED', 
-            'Exame_Alterado': 'Exame Alterado',
-            'Tipo_de_Pedido': 'Tipo de Pedido', 
-            'Funcao': 'Função'
-        }
-        
-        df_processado.rename(columns=mapa_nomes_invertido, inplace=True)
-        
-        # Reordena as colunas conforme o cabeçalho da planilha
-        df_final = df_processado.reindex(columns=cabecalho_planilha, fill_value='')
-        
-        # Separa registros novos e atualizações
+            return # Erro já foi logado na função
+            
+        colunas_rpa = obter_colunas_rpa()
         registros_novos = []
         registros_para_atualizar = []
-        
-        # Colunas que devem ser comparadas para detectar mudanças (excluindo ID_Unico)
-        colunas_para_comparar = [col for col in cabecalho_planilha if col != 'ID_Unico']
-        
-        for idx, linha_arquivo in df_final.iterrows():
+
+        for _, linha_arquivo in df_processado.iterrows():
             id_unico = str(linha_arquivo['ID_Unico']).strip()
-            
+
             if id_unico in id_para_indice:
-                # Registro já existe - verificar se precisa ser atualizado
                 indice_planilha = id_para_indice[id_unico]
-                linha_planilha = df_planilha_existente.iloc[indice_planilha - 1]  # -1 porque id_para_indice já considera o cabeçalho
+                linha_planilha = df_planilha_existente.iloc[indice_planilha - 2]
                 
-                # Comparar se há diferenças
-                if comparar_linhas(linha_arquivo, linha_planilha, colunas_para_comparar):
-                    # Há diferenças - adicionar à lista de atualizações
-                    dados_linha = linha_arquivo.fillna('').tolist()
-                    registros_para_atualizar.append((indice_planilha, dados_linha))
+                if comparar_linhas(linha_arquivo, linha_planilha, colunas_rpa):
+                    logging.info(f"Detectada atualização para ID: {id_unico}")
+                    dados_para_atualizar = linha_arquivo[colunas_rpa].fillna('').tolist()
+                    registros_para_atualizar.append((indice_planilha, dados_para_atualizar))
             else:
-                # Registro novo - adicionar à lista de novos
-                dados_linha = linha_arquivo.fillna('').tolist()
-                registros_novos.append(dados_linha)
-        
-        # Executar as operações
-        total_operacoes = 0
-        
-        # 1. ADICIONAR registros novos
+                logging.info(f"Detectado novo registro: ID {id_unico}")
+                dados_para_adicionar = linha_arquivo[colunas_rpa].fillna('').tolist()
+                registros_novos.append(dados_para_adicionar)
+
+        # 4. EXECUÇÃO DAS OPERAÇÕES NA PLANILHA
         if registros_novos:
-            logging.info(f"Adicionando {len(registros_novos)} novos registros na aba {nome_aba}...")
+            logging.info(f"Adicionando {len(registros_novos)} novos registros (apenas colunas A-N)...")
             escrever_dados_planilha(registros_novos, nome_aba)
-            total_operacoes += len(registros_novos)
         
-        # 2. ATUALIZAR registros modificados (EM LOTE)
         if registros_para_atualizar:
-            logging.info(f"Atualizando {len(registros_para_atualizar)} registros modificados na aba {nome_aba}...")
-            executar_updates_em_lote(registros_para_atualizar, nome_aba)
-            total_operacoes += len(registros_para_atualizar)
+            logging.info(f"Atualizando {len(registros_para_atualizar)} registros (apenas colunas A-N)...")
+            executar_updates_em_lote_colunas_rpa(registros_para_atualizar, nome_aba, colunas_rpa)
         
-        # Relatório final
-        if total_operacoes == 0:
+        if not registros_novos and not registros_para_atualizar:
             logging.info(f"Nenhuma alteração necessária na aba {nome_aba}. Dados já estão sincronizados.")
         else:
-            logging.info(f"Sincronização concluída para {nome_aba}: {len(registros_novos)} novos + {len(registros_para_atualizar)} atualizados = {total_operacoes} operações.")
+            total = len(registros_novos) + len(registros_para_atualizar)
+            logging.info(f"Sincronização concluída para {nome_aba}: {len(registros_novos)} novos, {len(registros_para_atualizar)} atualizados = {total} operações.")
             
     except Exception as e:
-        logging.exception(f"Erro ao processar arquivo para aba {nome_aba}: {e}")
+        logging.exception(f"Erro CRÍTICO ao processar arquivo para aba {nome_aba}: {e}")
+
 
 def main():
     """
-    Função principal que orquestra todo o fluxo:
-    1. Limpa a pasta de databases.
-    2. Baixa os relatórios dos grupos definidos com sistema de retry.
-    3. Processa e sincroniza cada arquivo com Google Sheets (INCLUINDO UPDATES).
-    4. Atualiza o carimbo de execução.
+    Função principal que orquestra todo o fluxo.
     """
+    validar_configuracoes()
     mapa_arquivos_abas = dict(config['MAPEAMENTO_ARQUIVOS_ABAS'])
     excluir_arquivos_antigos()
     
@@ -724,19 +675,19 @@ def main():
     logging.info("Iniciando fase de download dos relatórios do BRNET...")
     logging.info("="*50)
     
+    # ### ALTERAÇÃO REVERTIDA ###
+    # Voltamos a usar a lista fixa para garantir que os nomes corretos sejam usados no download.
     grupos_para_baixar = [
         "GRUPO TRIGO", "ICTSI RIO", "CONCREMAT", "CONSTELLATION - EXAMES OCUPACIONAIS", "VLT RIO",
         "V.TAL - REDE NEUTRA DE TELECOMUNICACOES S.A.", "IKM", "BAKER HUGHES", "RIP ES", "RIP MACAÉ"
     ]
     
-    # Executa o download com sistema de retry
-    grupos_falharam = baixar_relatorios_com_retry(grupos_para_baixar)
+    baixar_relatorios_com_retry(grupos_para_baixar)
     
     logging.info("="*50)
     logging.info("Iniciando processamento e sincronização com UPDATE em lote...")
     logging.info("="*50)
     
-    # Processa e sincroniza cada arquivo
     for chave_arquivo, nome_aba in mapa_arquivos_abas.items():
         processar_e_sincronizar_arquivo_com_update(chave_arquivo, nome_aba)
     

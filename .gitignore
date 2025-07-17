@@ -33,3 +33,5 @@ Thumbs.db
 # === Scripts de Teste ===
 baker_hughes.py
 sync_sheets.py
+
+.env
